@@ -1,0 +1,23 @@
+[package]
+name = "chune"
+version = "0.1.0"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serenity = { version = "0.10", default-features = false, features = ["client", "gateway", "rustls_backend", "model", "voice", "cache", "unstable_discord_api"] }
+songbird = "0.2"
+
+serde = "1.0"
+toml = "0.5"
+
+log = "0.4"
+env_logger = "0.9"
+
+thiserror = "1.0"
+anyhow = "1"
+
+dashmap = "4"
+youtube_dl = "0.6"
