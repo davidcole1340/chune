@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::Arc,
-};
+use std::{collections::VecDeque, sync::Arc};
 use tokio::sync::Mutex;
 
 use dashmap::{mapref::one::RefMut, DashMap};
@@ -9,7 +6,6 @@ use serenity::{
     async_trait,
     client::{Context, EventHandler},
     model::{
-        channel::Channel,
         id::{ChannelId, GuildId, UserId},
         interactions::{
             application_command::{
