@@ -7,6 +7,7 @@ use crate::error::ConfigError;
 pub struct Config {
     pub token: String,
     pub app_id: u64,
+    pub register: bool,
 }
 
 impl Config {

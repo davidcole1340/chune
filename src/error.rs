@@ -25,6 +25,9 @@ pub enum PlayError {
     #[error("Join a voice channel before trying to queue a song.")]
     NoChannel,
 
+    #[error("Bot isn't playing in this guild.")]
+    BotNotPlaying,
+
     #[error("Unknown play command error: {0:?}")]
     Unknown(DynError),
 }

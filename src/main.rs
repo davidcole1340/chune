@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use bot::Handler;
 use config::Config;
@@ -12,10 +14,10 @@ mod error;
 async fn main() -> Result<()> {
     env_logger::init();
 
-    let config = Config::from_path("config.toml")?;
-    let handler = Handler::default();
+    let config = Arc::new(Config::from_path("config.toml")?);
+    let handler = Handler::new(config.clone());
 
-    Client::builder(config.token)
+    Client::builder(config.token.clone())
         .event_handler(handler)
         .application_id(config.app_id)
         .register_songbird()

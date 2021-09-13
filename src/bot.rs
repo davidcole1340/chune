@@ -1,5 +1,4 @@
 use std::{collections::VecDeque, sync::Arc};
-use tokio::sync::Mutex;
 
 use dashmap::{mapref::one::RefMut, DashMap};
 use serenity::{
@@ -18,11 +17,25 @@ use serenity::{
 use songbird::{tracks::TrackHandle, Event, TrackEvent};
 use youtube_dl::{YoutubeDl, YoutubeDlOutput};
 
-use crate::error::PlayError;
+use crate::{config::Config, error::PlayError};
+
+pub struct Handler {
+    internal: Arc<InternalHandler>,
+    config: Arc<Config>,
+}
+
+impl Handler {
+    pub fn new(config: Arc<Config>) -> Self {
+        Self {
+            internal: Arc::default(),
+            config,
+        }
+    }
+}
 
 #[derive(Default)]
-pub struct Handler {
-    guilds: DashMap<GuildId, Arc<Mutex<Guild>>>,
+pub struct InternalHandler {
+    guilds: DashMap<GuildId, Guild>,
 }
 
 #[derive(Debug)]
@@ -50,34 +63,32 @@ pub struct Song {
 }
 
 #[async_trait]
-impl EventHandler for Handler
-where
-    Handler: 'static,
-{
+impl EventHandler for Handler {
     async fn ready(&self, ctx: serenity::client::Context, _: serenity::model::prelude::Ready) {
         log::info!("bot ready");
 
-        let bot_id = ctx.http.get_current_application_info().await.unwrap();
-        dbg!(bot_id);
+        if self.config.register {
+            ApplicationCommand::set_global_application_commands(&ctx.http, |cmds| {
+                cmds.create_application_command(|cmd| {
+                    cmd.name("play")
+                        .description("Adds a track to the users voice channel song queue.")
+                        .create_option(|opt| {
+                            opt.name("song")
+                                .description("URL to the song to play.")
+                                .kind(ApplicationCommandOptionType::String)
+                                .required(true)
+                        })
+                })
+                .create_application_command(|cmd| {
+                    cmd.name("skip")
+                        .description("Skips the currently playing song.")
+                })
+            })
+            .await
+            .expect("Failed to create bot commands");
+        }
 
-        ApplicationCommand::set_global_application_commands(&ctx.http, |cmds| {
-            cmds.create_application_command(|cmd| {
-                cmd.name("play")
-                    .description("Adds a track to the users voice channel song queue.")
-                    .create_option(|opt| {
-                        opt.name("song")
-                            .description("URL to the song to play.")
-                            .kind(ApplicationCommandOptionType::String)
-                            .required(true)
-                    })
-            })
-            .create_application_command(|cmd| {
-                cmd.name("skip")
-                    .description("Skips the currently playing song.")
-            })
-        })
-        .await
-        .expect("Failed to create bot commands");
+        log::info!("set up commands");
     }
 
     async fn interaction_create(
@@ -85,18 +96,29 @@ where
         ctx: serenity::client::Context,
         interaction: serenity::model::interactions::Interaction,
     ) {
+        log::info!("interaction received");
+
         if let Interaction::ApplicationCommand(cmd) = interaction {
             let response = match cmd.data.name.as_str() {
-                "play" => self.handle_play_cmd(ctx.clone(), &cmd),
-                // "skip" => {}
+                "play" => self.handle_play(ctx.clone(), &cmd).await,
+                "skip" => self.handle_skip(ctx.clone(), &cmd).await,
                 _ => return,
-            }
-            .await;
+            };
 
             if let Err(e) = response {
                 match e {
-                    PlayError::Unknown(_) => todo!(),
+                    PlayError::Unknown(e) => {
+                        log::warn!("internal command error: {:?}", e);
+                        let _ = cmd
+                            .create_interaction_response(&ctx.http, |resp| {
+                                resp.interaction_response_data(|data| {
+                                    data.content("Something went wrong. Give it another go?")
+                                })
+                            })
+                            .await;
+                    }
                     e => {
+                        log::warn!("user command error: {:?}", &e);
                         let _ = cmd
                             .create_interaction_response(&ctx.http, |resp| {
                                 resp.interaction_response_data(|data| data.content(e.to_string()))
@@ -109,15 +131,14 @@ where
     }
 }
 
-impl Handler
-where
-    Handler: 'static,
-{
-    pub async fn handle_play_cmd(
+impl Handler {
+    pub async fn handle_play(
         &self,
         ctx: Context,
         cmd: &ApplicationCommandInteraction,
     ) -> Result<(), PlayError> {
+        log::info!("received play command");
+
         let guild_id = cmd.guild_id.ok_or(PlayError::NoGuildId)?;
         let url = cmd
             .data
@@ -128,6 +149,17 @@ where
             .ok_or(PlayError::NoUrl)?;
         let task_url = url.to_string();
 
+        let channel_id = self
+            .get_user_channel(&ctx, guild_id, cmd.user.id)
+            .await
+            .ok_or(PlayError::NoChannel)?;
+
+        log::info!(
+            "running ytdl for url `{}`, guild {} channel {}",
+            url,
+            guild_id,
+            channel_id
+        );
         let yt_resp = tokio::spawn(async move {
             YoutubeDl::new(task_url)
                 .socket_timeout("15")
@@ -137,15 +169,10 @@ where
         .await
         .map_err(|e| PlayError::Unknown(Box::new(e)))?
         .map_err(|_| PlayError::Ytdl(url.to_string()))?;
-
-        let channel_id = self
-            .get_user_channel(&ctx, guild_id, cmd.user.id)
-            .await
-            .ok_or(PlayError::NoChannel)?;
-        let guild_mutex = self.get_guild(guild_id, channel_id);
+        log::info!("ytdl success");
 
         {
-            let mut guild = guild_mutex.lock().await;
+            let mut guild = self.get_guild(guild_id, channel_id);
 
             match yt_resp {
                 YoutubeDlOutput::Playlist(playlist) => {
@@ -180,7 +207,34 @@ where
             }
         }
 
-        Guild::check_guild_queue(&guild_mutex, guild_id, &ctx).await?;
+        self.internal.check_guild_queue(guild_id, &ctx).await?;
+        Ok(())
+    }
+
+    pub async fn handle_skip(
+        &self,
+        ctx: Context,
+        cmd: &ApplicationCommandInteraction,
+    ) -> Result<(), PlayError> {
+        log::info!("received skip command");
+
+        let guild_id = cmd.guild_id.ok_or(PlayError::NoGuildId)?;
+        let guild = self
+            .internal
+            .guilds
+            .get_mut(&guild_id)
+            .ok_or(PlayError::BotNotPlaying)?;
+
+        if let Some(handle) = guild.handle.as_ref() {
+            handle.stop().map_err(|e| PlayError::Unknown(Box::new(e)))?;
+        }
+
+        let _ = cmd
+            .create_interaction_response(&ctx.http, |resp| {
+                resp.interaction_response_data(|data| data.content("✅"))
+            })
+            .await;
+
         Ok(())
     }
 
@@ -198,18 +252,20 @@ where
             .channel_id
     }
 
-    fn get_guild(
-        &self,
-        guild_id: GuildId,
-        channel_id: ChannelId,
-    ) -> RefMut<GuildId, Arc<Mutex<Guild>>> {
-        match self.guilds.get_mut(&guild_id) {
-            Some(guild) => guild,
+    fn get_guild(&self, guild_id: GuildId, channel_id: ChannelId) -> RefMut<GuildId, Guild> {
+        match self.internal.guilds.get_mut(&guild_id) {
+            Some(mut guild) => {
+                guild.channel_id = channel_id;
+                guild
+            },
             None => {
-                let guild = Arc::new(Mutex::new(Guild::new(channel_id)));
-                let result = self.guilds.insert(guild_id, guild);
+                let result = self
+                    .internal
+                    .guilds
+                    .insert(guild_id, Guild::new(channel_id));
                 debug_assert!(result.is_none());
-                self.guilds
+                self.internal
+                    .guilds
                     .get_mut(&guild_id)
                     .expect("Inserted new guild and still failed to get mutable reference")
             }
@@ -217,18 +273,21 @@ where
     }
 }
 
-impl Guild {
+impl InternalHandler {
     async fn check_guild_queue(
-        guild_mutex: &Arc<Mutex<Guild>>,
+        self: &Arc<Self>,
         guild_id: GuildId,
         ctx: &Context,
     ) -> Result<(), PlayError> {
-        let mut guild = guild_mutex.lock().await;
+        log::info!("guild {} checking queue", guild_id);
+
+        let mut guild = self.guilds.get_mut(&guild_id).ok_or(PlayError::NoChannel)?;
         let songbird = songbird::get(ctx).await.unwrap();
 
         if guild.now_playing.is_none() {
             if let Some(new) = guild.queue.pop_front() {
-                log::warn!("playing {:?}", &new);
+                log::info!("guild {} playing {:?}", guild_id, &new);
+
                 let (call, result) = songbird.join(guild_id, guild.channel_id).await;
                 result.map_err(|_| PlayError::Join)?;
 
@@ -242,7 +301,7 @@ impl Guild {
                         SongEndHandler {
                             ctx: ctx.clone(),
                             guild_id,
-                            guild: guild_mutex.clone(),
+                            handler: self.clone(),
                         },
                     )
                     .map_err(|e| PlayError::Unknown(Box::new(e)))?;
@@ -250,8 +309,14 @@ impl Guild {
                 guild.handle.replace(handle);
                 guild.now_playing.replace(new);
             } else {
+                log::info!("guild {} queue empty, leaving channel", guild_id);
+
                 let _ = songbird.remove(guild_id).await;
+                drop(guild);
+                self.guilds.remove(&guild_id);
             }
+        } else {
+            log::info!("guild {} song already playing", guild_id);
         }
 
         Ok(())
@@ -261,18 +326,25 @@ impl Guild {
 struct SongEndHandler {
     ctx: Context,
     guild_id: GuildId,
-    guild: Arc<Mutex<Guild>>,
+    handler: Arc<InternalHandler>,
 }
 
 #[async_trait]
 impl songbird::EventHandler for SongEndHandler {
     async fn act(&self, _: &songbird::EventContext<'_>) -> Option<Event> {
+        log::info!("guild {} song finished", self.guild_id);
+
         {
-            let mut guild = self.guild.lock().await;
+            let mut guild = self.handler.guilds.get_mut(&self.guild_id)?;
             guild.now_playing = None;
+            guild.handle = None;
         }
 
-        let _ = Guild::check_guild_queue(&self.guild, self.guild_id, &self.ctx).await;
+        let _ = self
+            .handler
+            .check_guild_queue(self.guild_id, &self.ctx)
+            .await;
+
         None
     }
 }
@@ -307,7 +379,6 @@ impl IntoResponse for youtube_dl::SingleVideo {
         cmd: &ApplicationCommandInteraction,
         pos: usize,
     ) -> Result<(), PlayError> {
-        dbg!(&self);
         cmd.create_interaction_response(&ctx.http, |resp| {
             resp.interaction_response_data(|data| {
                 data.create_embed(|embed| {
