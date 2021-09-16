@@ -10,7 +10,7 @@ use serenity::{
             application_command::{
                 ApplicationCommand, ApplicationCommandInteraction, ApplicationCommandOptionType,
             },
-            Interaction,
+            Interaction, InteractionResponseType,
         },
     },
 };
@@ -99,6 +99,12 @@ impl EventHandler for Handler {
         log::info!("interaction received");
 
         if let Interaction::ApplicationCommand(cmd) = interaction {
+            let _ = cmd
+                .create_interaction_response(&ctx.http, |resp| {
+                    resp.kind(InteractionResponseType::DeferredChannelMessageWithSource)
+                })
+                .await;
+
             let response = match cmd.data.name.as_str() {
                 "play" => self.handle_play(ctx.clone(), &cmd).await,
                 "skip" => self.handle_skip(ctx.clone(), &cmd).await,
@@ -110,18 +116,16 @@ impl EventHandler for Handler {
                     PlayError::Unknown(e) => {
                         log::warn!("internal command error: {:?}", e);
                         let _ = cmd
-                            .create_interaction_response(&ctx.http, |resp| {
-                                resp.interaction_response_data(|data| {
-                                    data.content("Something went wrong. Give it another go?")
-                                })
+                            .edit_original_interaction_response(&ctx.http, |resp| {
+                                resp.content("Something went wrong. Give it another go?")
                             })
                             .await;
                     }
                     e => {
                         log::warn!("user command error: {:?}", &e);
                         let _ = cmd
-                            .create_interaction_response(&ctx.http, |resp| {
-                                resp.interaction_response_data(|data| data.content(e.to_string()))
+                            .edit_original_interaction_response(&ctx.http, |resp| {
+                                resp.content(e.to_string())
                             })
                             .await;
                     }
@@ -230,9 +234,7 @@ impl Handler {
         }
 
         let _ = cmd
-            .create_interaction_response(&ctx.http, |resp| {
-                resp.interaction_response_data(|data| data.content("✅"))
-            })
+            .edit_original_interaction_response(&ctx.http, |resp| resp.content("✅"))
             .await;
 
         Ok(())
@@ -257,7 +259,7 @@ impl Handler {
             Some(mut guild) => {
                 guild.channel_id = channel_id;
                 guild
-            },
+            }
             None => {
                 let result = self
                     .internal
@@ -379,29 +381,27 @@ impl IntoResponse for youtube_dl::SingleVideo {
         cmd: &ApplicationCommandInteraction,
         pos: usize,
     ) -> Result<(), PlayError> {
-        cmd.create_interaction_response(&ctx.http, |resp| {
-            resp.interaction_response_data(|data| {
-                data.create_embed(|embed| {
-                    embed.author(|author| {
-                        if let Some(avatar) = cmd.user.avatar_url() {
-                            author.icon_url(avatar);
-                        }
-
-                        author.name("Added to queue")
-                    });
-
-                    if let Some(thumb) = self.thumbnail.as_ref() {
-                        embed.thumbnail(thumb);
+        cmd.edit_original_interaction_response(&ctx.http, |resp| {
+            resp.create_embed(|embed| {
+                embed.author(|author| {
+                    if let Some(avatar) = cmd.user.avatar_url() {
+                        author.icon_url(avatar);
                     }
 
-                    embed.title(self.title.as_str());
+                    author.name("Added to queue")
+                });
 
-                    if let Some(url) = self.webpage_url.as_ref() {
-                        embed.url(url);
-                    }
+                if let Some(thumb) = self.thumbnail.as_ref() {
+                    embed.thumbnail(thumb);
+                }
 
-                    embed.field("Position", pos.to_string(), false)
-                })
+                embed.title(self.title.as_str());
+
+                if let Some(url) = self.webpage_url.as_ref() {
+                    embed.url(url);
+                }
+
+                embed.field("Position", pos.to_string(), false)
             })
         })
         .await
