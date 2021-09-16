@@ -151,7 +151,7 @@ impl Handler {
             .and_then(|opt| opt.value.as_ref())
             .and_then(|val| val.as_str())
             .ok_or(PlayError::NoUrl)?;
-        let task_url = url.to_string();
+        let task_query = format!("ytsearch1:{}", url);
 
         let channel_id = self
             .get_user_channel(&ctx, guild_id, cmd.user.id)
@@ -165,7 +165,7 @@ impl Handler {
             channel_id
         );
         let yt_resp = tokio::spawn(async move {
-            YoutubeDl::new(task_url)
+            YoutubeDl::new(task_query)
                 .socket_timeout("15")
                 .format("bestaudio")
                 .run()
@@ -369,7 +369,30 @@ impl IntoResponse for youtube_dl::Playlist {
         cmd: &ApplicationCommandInteraction,
         pos: usize,
     ) -> Result<(), PlayError> {
-        todo!()
+        if let Some(entries) = &self.entries {
+            if entries.len() == 1 {
+                return entries.first().unwrap().build_response(ctx, cmd, pos).await;
+            }
+        }
+
+        let _ = cmd
+            .edit_original_interaction_response(&ctx.http, |resp| {
+                resp.create_embed(|embed| {
+                    embed
+                        .author(|author| {
+                            if let Some(avatar) = cmd.user.avatar_url() {
+                                author.icon_url(avatar);
+                            }
+
+                            author.name("Added to queue")
+                        })
+                        .title(self.title.as_deref().or(self.id.as_deref()).unwrap_or("No playlist name"))
+                        .field("Position", pos.to_string(), false)
+                })
+            })
+            .await;
+
+        Ok(())
     }
 }
 
@@ -381,31 +404,31 @@ impl IntoResponse for youtube_dl::SingleVideo {
         cmd: &ApplicationCommandInteraction,
         pos: usize,
     ) -> Result<(), PlayError> {
-        cmd.edit_original_interaction_response(&ctx.http, |resp| {
-            resp.create_embed(|embed| {
-                embed.author(|author| {
-                    if let Some(avatar) = cmd.user.avatar_url() {
-                        author.icon_url(avatar);
+        let _ = cmd
+            .edit_original_interaction_response(&ctx.http, |resp| {
+                resp.create_embed(|embed| {
+                    embed.author(|author| {
+                        if let Some(avatar) = cmd.user.avatar_url() {
+                            author.icon_url(avatar);
+                        }
+
+                        author.name("Added to queue")
+                    });
+
+                    if let Some(thumb) = self.thumbnail.as_ref() {
+                        embed.thumbnail(thumb);
                     }
 
-                    author.name("Added to queue")
-                });
+                    embed.title(self.title.as_str());
 
-                if let Some(thumb) = self.thumbnail.as_ref() {
-                    embed.thumbnail(thumb);
-                }
+                    if let Some(url) = self.webpage_url.as_ref() {
+                        embed.url(url);
+                    }
 
-                embed.title(self.title.as_str());
-
-                if let Some(url) = self.webpage_url.as_ref() {
-                    embed.url(url);
-                }
-
-                embed.field("Position", pos.to_string(), false)
+                    embed.field("Position", pos.to_string(), false)
+                })
             })
-        })
-        .await
-        .unwrap();
+            .await;
         Ok(())
     }
 }
