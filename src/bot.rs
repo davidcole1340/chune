@@ -293,7 +293,7 @@ impl InternalHandler {
                 let (call, result) = songbird.join(guild_id, guild.channel_id).await;
                 result.map_err(|_| PlayError::Join)?;
 
-                let source = songbird::ffmpeg(&new.url)
+                let source = songbird::ytdl(&new.url)
                     .await
                     .map_err(|_| PlayError::Ffmpeg)?;
                 let handle = call.lock().await.play_source(source);
@@ -386,7 +386,12 @@ impl IntoResponse for youtube_dl::Playlist {
 
                             author.name("Added to queue")
                         })
-                        .title(self.title.as_deref().or(self.id.as_deref()).unwrap_or("No playlist name"))
+                        .title(
+                            self.title
+                                .as_deref()
+                                .or(self.id.as_deref())
+                                .unwrap_or("No playlist name"),
+                        )
                         .field("Position", pos.to_string(), false)
                 })
             })
